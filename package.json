@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "call": "node scripts/call.js",
-    "test-voice": "node scripts/test-voice.js"
+    "test-voice": "node scripts/test-voice.js",
+    "test-email": "node scripts/test-email.js"
   },
   "repository": {
     "type": "git",
@@ -20,7 +21,9 @@
     "@anthropic-ai/sdk": "^0.131.0",
     "dotenv": "^18.0.5",
     "express": "^5.2.1",
+    "express-mailer": "^0.3.1",
     "express-ws": "^5.0.2",
+    "nodemailer": "^10.0.13",
     "plivo": "^4.79.0",
     "ws": "^8.22.0"
   },

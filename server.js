@@ -12,6 +12,7 @@ const { streamTurn, OPENING_PITCH, OPENING_GREETING, MODEL } = require('./lib/br
 const { addToDnc } = require('./lib/dnc');
 const { placeCall } = require('./lib/dialer');
 const { handleStream } = require('./lib/streaming');
+const { initEmailService, sendCreditCardReceipt, sendSalesEmail, sendBulkEmails } = require('./lib/email');
 
 const PORT = Number(process.env.PORT) || 3003;
 const BASE_URL = (process.env.WEBHOOK_URL || '').replace(/\/+$/, '');
@@ -120,6 +121,49 @@ function handleSilence(res) {
 
 app.get('/health', (req, res) => res.json({ ok: true, activeCalls: calls.size }));
 
+// ---- Email service endpoints ----
+
+app.post('/api/send-receipt', express.json(), async (req, res) => {
+  try {
+    const result = await sendCreditCardReceipt(req.body);
+    res.json({ success: true, messageId: result.messageId });
+  } catch (err) {
+    console.error('Failed to send receipt:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/send-sales-email', express.json(), async (req, res) => {
+  try {
+    const result = await sendSalesEmail(req.body);
+    res.json({ success: true, messageId: result.messageId });
+  } catch (err) {
+    console.error('Failed to send sales email:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/send-bulk-emails', express.json(), async (req, res) => {
+  try {
+    const { emails, template } = req.body;
+    if (!Array.isArray(emails)) {
+      return res.status(400).json({ success: false, error: 'emails must be an array' });
+    }
+    const results = await sendBulkEmails(emails, template);
+    const successful = results.filter(r => r.success).length;
+    res.json({
+      success: true,
+      total: results.length,
+      successful,
+      failed: results.length - successful,
+      results
+    });
+  } catch (err) {
+    console.error('Failed to send bulk emails:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
 // ---- Control page (only reachable from this computer, never through ngrok) ----
 
 function localOnly(req, res, next) {
@@ -214,7 +258,7 @@ app.post('/plivo/hangup', verifyPlivo, (req, res) => {
   res.sendStatus(200);
 });
 
-prepareStaticAudio()
+Promise.all([prepareStaticAudio(), initEmailService()])
   .then(() => {
     app.listen(PORT, (err) => {
       if (err) {
@@ -230,9 +274,10 @@ prepareStaticAudio()
       console.log(`Answer URL: ${BASE_URL}/plivo/answer`);
       console.log(`Pitch audio: ${staticAudio.pitch}`);
       console.log(`Claude model: ${MODEL}${USE_FILLERS ? '' : ' (fillers off)'}`);
+      console.log('Email service ready - endpoints: /api/send-receipt, /api/send-sales-email, /api/send-bulk-emails');
     });
   })
   .catch((err) => {
-    console.error('Could not generate voice audio from ElevenLabs:', err.message);
+    console.error('Could not start server:', err.message);
     process.exit(1);
   });
