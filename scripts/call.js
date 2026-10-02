@@ -13,7 +13,7 @@ if (isOnDnc(to)) {
   process.exit(1);
 }
 
-const from = process.env.PLIVO_FROM_NUMBER || '+17163673144';
+const from = process.env.PLIVO_FROM_NUMBER || process.env.PLIVO_PHONE_NUMBER || '+17163673144';
 const baseUrl = process.env.WEBHOOK_URL.replace(/\/+$/, '');
 const client = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
 
