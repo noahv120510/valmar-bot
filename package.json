@@ -1,0 +1,26 @@
+{
+  "name": "valmar-bot",
+  "version": "1.0.0",
+  "description": "AI outbound calling bot for Valmar Merchant Services (Plivo + Claude + ElevenLabs)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "call": "node scripts/call.js",
+    "test-voice": "node scripts/test-voice.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/noahv120510/valmar-bot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/noahv120510/valmar-bot/issues"
+  },
+  "homepage": "https://github.com/noahv120510/valmar-bot#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1",
+    "plivo": "^4.79.0"
+  },
+  "private": true
+}
