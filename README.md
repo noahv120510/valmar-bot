@@ -39,9 +39,12 @@ npm run test-voice
 ngrok http --url=fastness-hankie-blurry.ngrok-free.dev 3003
 npm start
 
-# 3. Call your own cell phone first
+# 3. Call your own cell phone first: open http://localhost:3003 and click Call,
+#    or from a terminal:
 npm run call -- +1YOURCELL
 ```
+
+The control page at http://localhost:3003 places calls and shows live and recent transcripts. It only answers requests from your own computer, never through the public ngrok URL.
 
 Watch the `npm start` terminal: it prints each thing the prospect says and each reply from the bot. If a request is rejected with `Invalid signature`, make sure `WEBHOOK_URL` exactly matches the ngrok URL. You can set `VERIFY_PLIVO_SIGNATURE=false` temporarily to rule it out.
 

@@ -9,6 +9,7 @@ const plivo = require('plivo');
 const { synthesize } = require('./lib/elevenlabs');
 const { nextTurn, OPENING_PITCH } = require('./lib/brain');
 const { addToDnc } = require('./lib/dnc');
+const { placeCall } = require('./lib/dialer');
 
 const PORT = Number(process.env.PORT) || 3003;
 const BASE_URL = (process.env.WEBHOOK_URL || '').replace(/\/+$/, '');
@@ -125,6 +126,40 @@ function sendXml(res, xml) {
 
 app.get('/health', (req, res) => res.json({ ok: true, activeCalls: calls.size }));
 
+// ---- Control page (only reachable from this computer, never through ngrok) ----
+
+function localOnly(req, res, next) {
+  const fromLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+  const viaTunnel = req.get('X-Forwarded-For') || req.get('X-Forwarded-Host') || req.get('ngrok-skip-browser-warning');
+  const localHost = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.get('Host') || '');
+  if (fromLoopback && !viaTunnel && localHost) return next();
+  res.status(404).send('Not found');
+}
+
+app.get('/', localOnly, (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+app.post('/api/call', localOnly, express.json(), async (req, res) => {
+  try {
+    const result = await placeCall(req.body.phone_number);
+    console.log(`Dialing ${result.to} from ${result.from}`);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('Call failed:', err.message || err);
+    res.status(400).json({ success: false, error: err.message || String(err) });
+  }
+});
+
+app.get('/api/calls', localOnly, (req, res) => {
+  const active = [...calls.values()].map((c) => ({ callUuid: c.uuid, to: c.to, startedAt: c.startedAt, active: true, transcript: c.transcript }));
+  const past = fs
+    .readdirSync(CALL_LOG_DIR)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => JSON.parse(fs.readFileSync(path.join(CALL_LOG_DIR, f), 'utf8')))
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    .slice(0, 20);
+  res.json([...active, ...past]);
+});
+
 // Plivo hits this when the prospect picks up.
 app.post('/plivo/answer', verifyPlivo, (req, res) => {
   const call = getCall(req.body);
@@ -201,6 +236,7 @@ prepareStaticAudio()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`Valmar bot listening on port ${PORT}`);
+      console.log(`Control page: http://localhost:${PORT}`);
       console.log(`Answer URL: ${BASE_URL}/plivo/answer`);
       console.log(`Pitch audio: ${staticAudio.pitch}`);
     });
