@@ -252,7 +252,7 @@ function startTurn(call, speech) {
         const now = Date.now();
         console.log(
           `[${call.uuid}] first audio ready ${now - turn.startedAt}ms after they stopped talking ` +
-            `(Claude ${textAt - turn.startedAt}ms + voice ${now - textAt}ms)`,
+            `(Claude ${textAt - turn.startedAt}ms, first word at ${turn.firstTokenMs}ms + voice ${now - textAt}ms)`,
         );
       }
       return url;
@@ -262,7 +262,7 @@ function startTurn(call, speech) {
     changed();
   };
 
-  streamTurn(call.history, speech, onSegment)
+  streamTurn(call.history, speech, onSegment, () => (turn.firstTokenMs = Date.now() - turn.startedAt))
     .then((reply) => {
       turn.endCall = reply.endCall;
       call.transcript.push({ speaker: 'bot', text: reply.text });
