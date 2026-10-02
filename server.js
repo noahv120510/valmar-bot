@@ -234,7 +234,15 @@ app.post('/plivo/hangup', verifyPlivo, (req, res) => {
 
 prepareStaticAudio()
   .then(() => {
-    app.listen(PORT, () => {
+    app.listen(PORT, (err) => {
+      if (err) {
+        console.error(
+          err.code === 'EADDRINUSE'
+            ? `Port ${PORT} is already in use. Another copy of the bot (or the old server) is still running: press Control + C in that Terminal tab, then run npm start again.`
+            : `Could not start the server: ${err.message}`,
+        );
+        process.exit(1);
+      }
       console.log(`Valmar bot listening on port ${PORT}`);
       console.log(`Control page: http://localhost:${PORT}`);
       console.log(`Answer URL: ${BASE_URL}/plivo/answer`);
