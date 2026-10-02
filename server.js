@@ -8,7 +8,7 @@ const plivo = require('plivo');
 const WebSocket = require('ws');
 
 const { synthesize, OUTPUT_FORMAT } = require('./lib/elevenlabs');
-const { streamTurn, OPENING_PITCH, MODEL } = require('./lib/brain');
+const { streamTurn, OPENING_PITCH, OPENING_GREETING, MODEL } = require('./lib/brain');
 const { addToDnc } = require('./lib/dnc');
 const { placeCall } = require('./lib/dialer');
 const { handleStream } = require('./lib/streaming');
@@ -39,7 +39,7 @@ function getCall(body) {
       to: body.To,
       startedAt: new Date().toISOString(),
       history: [],
-      transcript: [{ speaker: 'bot', text: OPENING_PITCH }],
+      transcript: [{ speaker: 'bot', text: OPENING_GREETING }],
     });
   }
   return calls.get(uuid);
@@ -52,19 +52,19 @@ async function saveAudio(fileName, text) {
 }
 
 async function prepareStaticAudio() {
-  // Generate opening pitch for fallback mode (if Deepgram isn't configured)
-  const text = OPENING_PITCH;
+  // Generate opening greeting
+  const text = OPENING_GREETING;
   const hash = crypto
     .createHash('sha1')
     .update([text, process.env.ELEVEN_LABS_VOICE_ID, process.env.ELEVEN_LABS_MODEL, OUTPUT_FORMAT].join('|'))
     .digest('hex')
     .slice(0, 10);
-  const fileName = `static-pitch-${hash}.mp3`;
+  const fileName = `static-greeting-${hash}.mp3`;
   if (fs.existsSync(path.join(AUDIO_DIR, fileName))) {
-    staticAudio.pitch = `${BASE_URL}/audio/${fileName}`;
+    staticAudio.greeting = `${BASE_URL}/audio/${fileName}`;
   } else {
-    staticAudio.pitch = await saveAudio(fileName, text);
-    console.log('Generated pitch audio');
+    staticAudio.greeting = await saveAudio(fileName, text);
+    console.log('Generated greeting audio');
   }
 }
 
@@ -99,6 +99,23 @@ function verifyPlivo(req, res, next) {
 
 function sendXml(res, xml) {
   res.type('application/xml').send(xml);
+}
+
+function playAndGetInput(audioUrl) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <GetInput action="${escapeXml(`${BASE_URL}/plivo/respond`)}" method="POST" inputType="speech" language="en-US" executionTimeout="10" speechEndTimeout="auto">
+    <Play>${escapeXml(audioUrl)}</Play>
+  </GetInput>
+  <Redirect method="POST">${escapeXml(`${BASE_URL}/plivo/no-input`)}</Redirect>
+</Response>`;
+}
+
+function handleSilence(res) {
+  sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Hangup/>
+</Response>`);
 }
 
 app.get('/health', (req, res) => res.json({ ok: true, activeCalls: calls.size }));
@@ -148,8 +165,17 @@ app.post('/plivo/answer', verifyPlivo, (req, res) => {
   <Stream bidirectional="true" audioFormat="mulaw" audioFrequency="8000">${escapeXml(`${BASE_URL}/plivo/stream/${call.uuid}`)}</Stream>
 </Response>`);
   } else {
-    sendXml(res, playAndListen(staticAudio.pitch));
+    sendXml(res, playAndGetInput(staticAudio.greeting));
   }
+});
+
+// ---- Fallback XML mode endpoints (used when DEEPGRAM_API_KEY not set) ----
+app.post('/plivo/respond', verifyPlivo, (req, res) => {
+  handleSilence(res);
+});
+
+app.post('/plivo/no-input', verifyPlivo, (req, res) => {
+  handleSilence(res);
 });
 
 // ---- Real-time streaming via WebSocket ----
