@@ -48,11 +48,23 @@ The control page at http://localhost:3003 places calls and shows live and recent
 
 Watch the `npm start` terminal: it prints each thing the prospect says and each reply from the bot. If a request is rejected with `Invalid signature`, make sure `WEBHOOK_URL` exactly matches the ngrok URL. You can set `VERIFY_PLIVO_SIGNATURE=false` temporarily to rule it out.
 
+## Speed
+
+After each reply the `npm start` window prints how long it took, for example:
+
+```
+first audio ready 1450ms after they stopped talking (Claude 1100ms + voice 350ms)
+```
+
+Replies are streamed: your voice starts on Claude's first sentence while Claude is still writing the rest. Plivo's own speech recognition also needs a moment to decide the prospect has finished talking, and that time comes before this number.
+
 ## Tuning
 
 | Setting | Default | Notes |
 |---|---|---|
-| `CLAUDE_MODEL` | `claude-opus-5-5` | Runs at low effort to keep reply latency down. |
+| `CLAUDE_MODEL` | `claude-opus-5-5` | Runs at low effort. `claude-sonnet-5-5` runs with thinking off and usually replies faster. |
+| `FILLERS` | on | Plays a quick "mm-hmm" or "gotcha" in your voice the moment they stop talking. Set `false` to turn off. |
+| `ELEVEN_LABS_FORMAT` | `mp3_22050_32` | Small files download faster. Phone audio can't carry more quality than this anyway. |
 | `ELEVEN_LABS_MODEL` | `eleven_flash_v2_5` | Fastest model. `eleven_multilingual_v2` sounds closer to you but is slower. |
 | `ELEVEN_LABS_STABILITY` / `ELEVEN_LABS_SIMILARITY` | `0.5` / `0.8` | Raise similarity if it doesn't sound enough like you. |
 
