@@ -175,6 +175,7 @@ function localOnly(req, res, next) {
 }
 
 app.get('/', localOnly, (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('/email', localOnly, (req, res) => res.sendFile(path.join(__dirname, 'public', 'email.html')));
 
 app.post('/api/call', localOnly, express.json(), async (req, res) => {
   try {
