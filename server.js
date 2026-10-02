@@ -1,7 +1,6 @@
 require('dotenv').config();
 
 const crypto = require('crypto');
-const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -17,7 +16,6 @@ const { handleStream } = require('./lib/streaming');
 const PORT = Number(process.env.PORT) || 3003;
 const BASE_URL = (process.env.WEBHOOK_URL || '').replace(/\/+$/, '');
 const VERIFY_SIGNATURE = process.env.VERIFY_PLIVO_SIGNATURE !== 'false';
-const USE_FILLERS = process.env.FILLERS !== 'false';
 const AUDIO_DIR = path.join(__dirname, 'audio');
 const CALL_LOG_DIR = path.join(__dirname, 'call-logs');
 
@@ -28,20 +26,7 @@ if (!BASE_URL) {
 fs.mkdirSync(AUDIO_DIR, { recursive: true });
 fs.mkdirSync(CALL_LOG_DIR, { recursive: true });
 
-// Fixed lines are synthesized once at startup, so the pitch plays the instant the call connects.
-const STATIC_LINES = {
-  pitch: OPENING_PITCH,
-  reprompt: "Sorry, I didn't catch that. Who handles payment processing for your business?",
-  retry: 'Sorry, could you say that one more time?',
-  goodbye: "No worries, I'll let you go. Have a great day.",
-  // Quick acknowledgements played the instant the prospect stops talking, while the real reply is generated.
-  filler0: 'Mm-hmm.',
-  filler1: 'Gotcha.',
-  filler2: 'Okay.',
-  filler3: 'Yeah, okay.',
-};
-const FILLER_NAMES = Object.keys(STATIC_LINES).filter((name) => name.startsWith('filler'));
-const staticAudio = {}; // name -> public URL
+const staticAudio = {}; // name -> public URL (only pitch, for fallback mode)
 
 // Active calls, keyed by Plivo CallUUID.
 const calls = new Map();
@@ -55,10 +40,6 @@ function getCall(body) {
       startedAt: new Date().toISOString(),
       history: [],
       transcript: [{ speaker: 'bot', text: OPENING_PITCH }],
-      audioFiles: [],
-      silences: 0,
-      turnCount: 0,
-      turn: null,
     });
   }
   return calls.get(uuid);
@@ -71,74 +52,27 @@ async function saveAudio(fileName, text) {
 }
 
 async function prepareStaticAudio() {
-  for (const [name, text] of Object.entries(STATIC_LINES)) {
-    // The hash in the file name means editing a line regenerates its audio.
-    const hash = crypto
-      .createHash('sha1')
-      .update([text, process.env.ELEVEN_LABS_VOICE_ID, process.env.ELEVEN_LABS_MODEL, OUTPUT_FORMAT].join('|'))
-      .digest('hex')
-      .slice(0, 10);
-    const fileName = `static-${name}-${hash}.mp3`;
-    if (fs.existsSync(path.join(AUDIO_DIR, fileName))) {
-      staticAudio[name] = `${BASE_URL}/audio/${fileName}`;
-    } else {
-      staticAudio[name] = await saveAudio(fileName, text);
-      console.log(`Generated ${name} audio`);
-    }
+  // Generate opening pitch for fallback mode (if Deepgram isn't configured)
+  const text = OPENING_PITCH;
+  const hash = crypto
+    .createHash('sha1')
+    .update([text, process.env.ELEVEN_LABS_VOICE_ID, process.env.ELEVEN_LABS_MODEL, OUTPUT_FORMAT].join('|'))
+    .digest('hex')
+    .slice(0, 10);
+  const fileName = `static-pitch-${hash}.mp3`;
+  if (fs.existsSync(path.join(AUDIO_DIR, fileName))) {
+    staticAudio.pitch = `${BASE_URL}/audio/${fileName}`;
+  } else {
+    staticAudio.pitch = await saveAudio(fileName, text);
+    console.log('Generated pitch audio');
   }
 }
 
-// ---- Plivo XML ----
+// ---- Server ----
 
 function escapeXml(s) {
   return String(s).replace(/[<>&'"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' })[c]);
 }
-
-// Play audio, then listen for the prospect's reply. If they say nothing, Plivo falls through to the Redirect.
-function playAndListen(audioUrl) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <GetInput action="${escapeXml(`${BASE_URL}/plivo/respond`)}" method="POST" inputType="speech" language="en-US" executionTimeout="10" speechEndTimeout="auto">
-    <Play>${escapeXml(audioUrl)}</Play>
-  </GetInput>
-  <Redirect method="POST">${escapeXml(`${BASE_URL}/plivo/no-input`)}</Redirect>
-</Response>`;
-}
-
-// Listen without playing anything first (used when the reply's audio has already played).
-function listenOnly() {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <GetInput action="${escapeXml(`${BASE_URL}/plivo/respond`)}" method="POST" inputType="speech" language="en-US" executionTimeout="10" speechEndTimeout="auto"/>
-  <Redirect method="POST">${escapeXml(`${BASE_URL}/plivo/no-input`)}</Redirect>
-</Response>`;
-}
-
-// Play one piece of a reply, then fetch the next piece (which is usually ready by then).
-function playAndContinue(audioUrl, nextUrl) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>${escapeXml(audioUrl)}</Play>
-  <Redirect method="POST">${escapeXml(nextUrl)}</Redirect>
-</Response>`;
-}
-
-function hangupOnly() {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Hangup/>
-</Response>`;
-}
-
-function playAndHangup(audioUrl) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>${escapeXml(audioUrl)}</Play>
-  <Hangup/>
-</Response>`;
-}
-
-// ---- Server ----
 
 const app = express();
 require('express-ws')(app);
@@ -218,146 +152,6 @@ app.post('/plivo/answer', verifyPlivo, (req, res) => {
   }
 });
 
-// ---- Replies ----
-// A reply is streamed: Claude's first sentence is turned into audio while Claude writes the rest,
-// and Plivo plays each piece as soon as it's ready.
-
-function waitFor(turn, ready, timeoutMs = Infinity) {
-  if (ready()) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    let timer;
-    const check = () => {
-      if (!ready()) return;
-      clearTimeout(timer);
-      turn.events.off('change', check);
-      resolve(true);
-    };
-    turn.events.on('change', check);
-    if (timeoutMs !== Infinity) {
-      timer = setTimeout(() => {
-        turn.events.off('change', check);
-        resolve(false);
-      }, timeoutMs);
-    }
-  });
-}
-
-function startTurn(call, speech) {
-  const turn = {
-    id: String(call.turnCount++),
-    segments: [], // promises of audio URLs, in speaking order
-    done: false,
-    endCall: false,
-    events: new EventEmitter(),
-    startedAt: Date.now(),
-  };
-  call.turn = turn;
-  const changed = () => turn.events.emit('change');
-
-  const onSegment = (text) => {
-    const index = turn.segments.length;
-    const fileName = `${call.uuid}-${turn.id}-${index}.mp3`;
-    call.audioFiles.push(fileName);
-    const textAt = Date.now();
-    const audio = saveAudio(fileName, text).then((url) => {
-      if (index === 0) {
-        const now = Date.now();
-        console.log(
-          `[${call.uuid}] first audio ready ${now - turn.startedAt}ms after they stopped talking ` +
-            `(Claude ${textAt - turn.startedAt}ms, first word at ${turn.firstTokenMs}ms + voice ${now - textAt}ms)`,
-        );
-      }
-      return url;
-    });
-    audio.catch(() => {}); // errors are handled where the audio is played
-    turn.segments.push(audio);
-    changed();
-  };
-
-  streamTurn(call.history, speech, onSegment, () => (turn.firstTokenMs = Date.now() - turn.startedAt))
-    .then((reply) => {
-      turn.endCall = reply.endCall;
-      call.transcript.push({ speaker: 'bot', text: reply.text });
-      console.log(`[${call.uuid}] bot: ${reply.text}${reply.endCall ? ' [END]' : ''}${reply.doNotCall ? ' [DNC]' : ''}`);
-      if (reply.doNotCall) {
-        addToDnc(call.to);
-        call.doNotCall = true;
-      }
-    })
-    .catch((err) => console.error(`[${call.uuid}] Claude failed:`, err.message || err))
-    .finally(() => {
-      turn.done = true;
-      changed();
-    });
-
-  return turn;
-}
-
-// Plivo XML for piece number `index` of a reply.
-async function replyXml(call, turn, index) {
-  await waitFor(turn, () => turn.segments.length > index || turn.done);
-
-  if (turn.segments.length <= index) {
-    // Nothing more to say. If nothing was said at all, Claude failed: ask them to repeat.
-    if (index === 0) return playAndListen(staticAudio.retry);
-    return turn.endCall ? hangupOnly() : listenOnly();
-  }
-
-  let audioUrl;
-  try {
-    audioUrl = await turn.segments[index];
-  } catch (err) {
-    console.error(`[${call.uuid}] voice failed:`, err.message || err);
-    if (index === 0) return playAndListen(staticAudio.retry);
-    return turn.endCall ? hangupOnly() : listenOnly();
-  }
-
-  // Claude usually finishes while this piece's audio is generated. Wait briefly to find out whether
-  // this is the last piece, so it can play inside GetInput (or before the hang-up) without an extra hop.
-  await waitFor(turn, () => turn.segments.length > index + 1 || turn.done, 1500);
-  const isLast = turn.done && turn.segments.length === index + 1;
-  if (isLast) return turn.endCall ? playAndHangup(audioUrl) : playAndListen(audioUrl);
-  return playAndContinue(audioUrl, `${BASE_URL}/plivo/reply/${turn.id}/${index + 1}`);
-}
-
-// Plivo posts the prospect's transcribed speech here.
-app.post('/plivo/respond', verifyPlivo, async (req, res) => {
-  const call = getCall(req.body);
-  const speech = (req.body.Speech || '').trim();
-
-  if (!speech) return handleSilence(call, res);
-  call.silences = 0;
-  call.transcript.push({ speaker: 'prospect', text: speech });
-  console.log(`[${call.uuid}] prospect: ${speech}`);
-
-  const turn = startTurn(call, speech);
-  if (USE_FILLERS) {
-    // Answer Plivo instantly with a quick "mm-hmm" while the real reply is generated.
-    const filler = FILLER_NAMES[Math.floor(Math.random() * FILLER_NAMES.length)];
-    return sendXml(res, playAndContinue(staticAudio[filler], `${BASE_URL}/plivo/reply/${turn.id}/0`));
-  }
-  sendXml(res, await replyXml(call, turn, 0));
-});
-
-// Plivo fetches each further piece of a reply here.
-app.post('/plivo/reply/:turnId/:index', verifyPlivo, async (req, res) => {
-  const call = calls.get(req.body.CallUUID);
-  if (!call || !call.turn || call.turn.id !== req.params.turnId) return sendXml(res, listenOnly());
-  sendXml(res, await replyXml(call, call.turn, Number(req.params.index)));
-});
-
-// GetInput timed out with no speech.
-app.post('/plivo/no-input', verifyPlivo, (req, res) => handleSilence(getCall(req.body), res));
-
-function handleSilence(call, res) {
-  call.silences += 1;
-  if (call.silences >= 2) {
-    console.log(`[${call.uuid}] no response, hanging up`);
-    return sendXml(res, playAndHangup(staticAudio.goodbye));
-  }
-  sendXml(res, playAndListen(staticAudio.reprompt));
-}
-
 // ---- Real-time streaming via WebSocket ----
 app.ws('/plivo/stream/:callUuid', (plivoWs, req) => {
   const callUuid = req.params.callUuid;
@@ -373,7 +167,7 @@ app.ws('/plivo/stream/:callUuid', (plivoWs, req) => {
   });
 });
 
-// Plivo hits this when the call ends: save the transcript and clean up audio.
+// Plivo hits this when the call ends: save the transcript.
 app.post('/plivo/hangup', verifyPlivo, (req, res) => {
   const call = calls.get(req.body.CallUUID);
   console.log(`[${req.body.CallUUID}] ended: ${req.body.HangupCause || 'unknown'} (${req.body.Duration || 0}s)`);
@@ -389,7 +183,6 @@ app.post('/plivo/hangup', verifyPlivo, (req, res) => {
       transcript: call.transcript,
     };
     fs.writeFileSync(path.join(CALL_LOG_DIR, `${call.uuid}.json`), JSON.stringify(log, null, 2));
-    for (const file of call.audioFiles) fs.rm(path.join(AUDIO_DIR, file), { force: true }, () => {});
     calls.delete(call.uuid);
   }
   res.sendStatus(200);
