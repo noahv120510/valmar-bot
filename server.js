@@ -6,11 +6,13 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const plivo = require('plivo');
+const WebSocket = require('ws');
 
 const { synthesize, OUTPUT_FORMAT } = require('./lib/elevenlabs');
 const { streamTurn, OPENING_PITCH, MODEL } = require('./lib/brain');
 const { addToDnc } = require('./lib/dnc');
 const { placeCall } = require('./lib/dialer');
+const { handleStream } = require('./lib/streaming');
 
 const PORT = Number(process.env.PORT) || 3003;
 const BASE_URL = (process.env.WEBHOOK_URL || '').replace(/\/+$/, '');
@@ -139,7 +141,9 @@ function playAndHangup(audioUrl) {
 // ---- Server ----
 
 const app = express();
+require('express-ws')(app);
 app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 app.use('/audio', express.static(AUDIO_DIR));
 
 // Reject webhook requests that weren't signed by Plivo with your auth token.
@@ -203,7 +207,15 @@ app.get('/api/calls', localOnly, (req, res) => {
 app.post('/plivo/answer', verifyPlivo, (req, res) => {
   const call = getCall(req.body);
   console.log(`[${call.uuid}] answered by ${call.to}`);
-  sendXml(res, playAndListen(staticAudio.pitch));
+  // Use streaming if Deepgram is configured, otherwise fall back to XML
+  if (process.env.DEEPGRAM_API_KEY) {
+    sendXml(res, `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Stream bidirectional="true" audioFormat="mulaw" audioFrequency="8000">${escapeXml(`${BASE_URL}/plivo/stream/${call.uuid}`)}</Stream>
+</Response>`);
+  } else {
+    sendXml(res, playAndListen(staticAudio.pitch));
+  }
 });
 
 // ---- Replies ----
@@ -345,6 +357,21 @@ function handleSilence(call, res) {
   }
   sendXml(res, playAndListen(staticAudio.reprompt));
 }
+
+// ---- Real-time streaming via WebSocket ----
+app.ws('/plivo/stream/:callUuid', (plivoWs, req) => {
+  const callUuid = req.params.callUuid;
+  const call = calls.get(callUuid);
+  if (!call) {
+    console.error(`[stream] unknown call: ${callUuid}`);
+    plivoWs.close();
+    return;
+  }
+  console.log(`[${callUuid}] streaming started`);
+  handleStream(plivoWs, call.history, call.transcript).catch((err) => {
+    console.error(`[${callUuid}] streaming error:`, err.message);
+  });
+});
 
 // Plivo hits this when the call ends: save the transcript and clean up audio.
 app.post('/plivo/hangup', verifyPlivo, (req, res) => {
